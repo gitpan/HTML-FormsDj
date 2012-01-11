@@ -1,5 +1,9 @@
 package HTML::FormsDj;
-our $VERSION = '0.02';
+
+use strict;
+use warnings;
+
+our $VERSION = '0.03';
 
 use Data::FormValidator;
 use Data::FormValidator::Constraints;
@@ -8,12 +12,13 @@ use Carp::Heavy;
 use Digest::SHA;
 use Carp;
 
+our $_csrftoken;
 
 sub new {
   my($this, %param) = @_;
   my $class = ref($this) || $this;
   my $self = \%param;
-  bless($self,$class);
+  bless $self, $class;
 
 
   if (exists $self->{meta}->{fields} && exists  $self->{meta}->{fieldsets}) {
@@ -39,11 +44,11 @@ sub new {
   }
 
   if (exists $self->{csrf}) {
-    if ($self->{csrf}) {
-      my $sha = new Digest::SHA('SHA-256');
+    if ($self->{csrf} && ! $_csrftoken) {
+      my $sha = Digest::SHA->new('SHA-256');
       $sha->reset();
       $self->{sha} = $sha;
-      $self->{'_csrftoken'} = $self->_gen_csrf_token(sort keys %{$self->{field}});
+      $_csrftoken = $self->_gen_csrf_token();
     }
   }
   else {
@@ -59,10 +64,10 @@ sub cleandata {
   # construct validator structs
   my(@required, @optional, %input, %attrs, %constraints);
 
+  $this->{isclean} = 0;
 
   if ($this->{csrf}) {
-    $this->_check_csrf(%data);
-    if (! $this->{isclean}) {
+    if(! $this->_check_csrf(%data)) {
       # CSRF check failed, so we don't tamper with input
       # further. die and done.
       return ();
@@ -83,7 +88,7 @@ sub cleandata {
 	push @optional, $field;
       }
       $constraints{ $field } = $this->{field}->{$field}->{validate};
-      $input{ $field } = $data{ $field } || '';
+      $input{ $field } = $data{ $field } || qq();
     }
   }
 
@@ -153,7 +158,7 @@ sub error {
     return $this->{error};
   }
   else {
-    return '';
+    return qq();
   }
 }
 
@@ -162,12 +167,18 @@ sub _check_csrf {
 
   if (! exists $data{csrftoken}) {
     $this->{error}   = 'CSRF ERROR: CSRF token is not supplied with POST data!';
-    $this->{isclean} = 0;
+    return 0;
   }
 
   if (! exists $this->{'_csrf_cookie'}) {
-    $this->{error}   = 'CSRF ERROR: CSRF cookie is not set correctly!';
-    $this->{isclean} = 0;
+    $this->{error}   = 'CSRF ERROR: CSRF cookie is not set correctly(notexist)!';
+    return 0;
+  }
+  else {
+    if(! $this->{'_csrf_cookie'} ) {
+      $this->{error}   = 'CSRF ERROR: CSRF cookie is not set correctly(undef)!';
+      return 0;
+    }
   }
 
   my $posttoken   = $data{csrftoken};          # hidden post var
@@ -176,9 +187,10 @@ sub _check_csrf {
   if ($posttoken ne $cookietoken) {
     $this->{error}   = 'CSRF ERROR:  supplied COOKIE csrftoken doesnt match stored csrf token!';
     $this->{error}  .= sprintf "<br>post: %s<br>cookie: %s", $posttoken, $cookietoken;
-    $this->{isclean} = 0;
+    return 0;
   }
 
+  return 1;
 }
 
 sub as_p {
@@ -271,7 +283,7 @@ sub fieldsets {
   }
 }
 
-sub dump {
+sub dumpmeta {
   my($this) = @_;
   my $dump = Dumper($this->{meta});
   $dump =~ s/^\$VAR1 = /        /;
@@ -281,20 +293,20 @@ sub dump {
 sub csrftoken {
   my($this) = @_;
   if ($this->{csrf}) {
-    return sprintf qq(<input type="hidden" name="csrftoken" value="%s"/>), $this->{'_csrftoken'};
+    return sprintf qq(<input type="hidden" name="csrftoken" value="%s"/>), $_csrftoken;
   }
   else {
-    return '';
+    return qq();
   }
 }
 
 sub getcsrf {
   my($this) = @_;
   if ($this->{csrf}) {
-    return $this->{'_csrftoken'};
+    return $_csrftoken;
   }
   else {
-    return '';
+    return qq();
   }
 }
 
@@ -303,6 +315,7 @@ sub csrfcookie {
   if ($this->{csrf}) {
     $this->{'_csrf_cookie'} = $token;
   }
+  return 1;
 }
 
 #
@@ -317,7 +330,7 @@ sub _message {
 sub _tr_field {
   my($this, $field) = @_;
   return $this->_tr(
-		   join(' ', @{$field->{classes}}),
+		   join(q( ), @{$field->{classes}}),
 		   $field->{id},
 		   $this->_label(
 				 $field->{id} . '_input',
@@ -379,7 +392,7 @@ sub _normalize_field {
   }
 
   if (! exists  $field->{message}) {
-    $field->{message} = '';
+    $field->{message} = qq();
   }
   if (exists $this->{invalid}->{$field->{field}}) {
     if (! exists $field->{message}) {
@@ -396,7 +409,7 @@ sub _normalize_field {
   }
 
   if (! exists $this->{raw}->{$field->{field}}) {
-    $field->{value} = '';
+    $field->{value} = qq();
   }
   else {
     $field->{value} = $this->{raw}->{$field->{field}};
@@ -410,7 +423,7 @@ sub _normalize_field {
   }
 
   if (! exists $field->{default}) {
-    $field->{default} = '';
+    $field->{default} = qq();
   }
 
   return $field;
@@ -423,16 +436,14 @@ sub _normalize {
     my @normalized;
     foreach my $field( @{$this->{meta}->{fields}}) {
       if (! exists $field->{field}) {
-	warn 'unnamed field, ignoring!';
+	carp 'unnamed field, ignoring!';
 	next;
       }
 
       push @normalized, $this->_normalize_field($field);
     }
     $this->{meta}->{fields} = \@normalized;
-    return;
   }
-
 
   if (exists $this->{meta}->{fieldsets}) {
 
@@ -452,13 +463,13 @@ sub _normalize {
       }
 
       if (! exists $fieldset->{legend}) {
-	$fieldset->{legend} = '';
+	$fieldset->{legend} = qq();
       }
 
       my @normalized;
       foreach my $field (@{$fieldset->{fields}}) {
 	if (! exists $field->{field}) {
-	  warn 'unnamed field, ignoring!';
+	  carp 'unnamed field, ignoring!';
 	  next;
 	}
 	push @normalized, $this->_normalize_field($field);
@@ -469,6 +480,8 @@ sub _normalize {
     }
     $this->{meta}->{fieldsets} = \@fieldsets;
   }
+
+  return;
 }
 
 
@@ -511,6 +524,8 @@ sub _label {
 sub _input {
   my ($this, $id, $type, $name, $value, $default) = @_;
 
+  my $html;
+
   if ($type eq 'text' || $type eq 'password') {
     if (! $value) {
       $value = $default;
@@ -526,7 +541,7 @@ sub _input {
     }
     elsif (ref($default) eq 'ARRAY') {
       foreach my $option (@{$default}) {
-	my $selected = '';
+	my $selected = qq();
 	if ($value eq $option->{value}) {
 	  $selected = ' selected';
 	}
@@ -540,7 +555,7 @@ sub _input {
     $html = qq(\n<ul>\n);
     if (ref($default) eq 'HASH') {
       foreach my $option (sort keys %{$default}) {
-	my $checked = '';
+	my $checked = qq();
 	if ($value eq $option->{value}) {
 	  $checked = qq( checked="checked");
 	}
@@ -554,7 +569,7 @@ sub _input {
     }
     elsif (ref($default) eq 'ARRAY') {
       foreach my $option (@{$default}) {
-	my $checked = '';
+	my $checked = qq();
 	if ($value eq $option->{value}) {
 	  $checked = qq( checked="checked");
 	}
@@ -581,9 +596,7 @@ sub _b {
 }
 
 sub _gen_csrf_token {
-  my($this, @names) = @_;
-  my $fieldnames = join '', @names;
-  $this->{sha}->add($fieldnames);
+  my($this) = @_;
   $this->{sha}->add(rand(10));
   $this->{sha}->add(time);
   my $csrftoken = $this->{sha}->hexdigest();
@@ -591,7 +604,9 @@ sub _gen_csrf_token {
   return $csrftoken;
 }
 
+1;
 
+__END__
 
 =head1 NAME
 
@@ -757,7 +772,7 @@ what about styling?
 
 Enter B<meta>.
 
-Using the B<meta> hash parameter to B<new()> you cann tell
+Using the B<meta> hash parameter to B<new()> you can tell
 B<HTML::FormsDj> how to do the mentioned things above and
 more.
 
@@ -1237,10 +1252,10 @@ This technique is not recommended for the average user.
 
 =head1 ERRORS AND DEBUGGING
 
-You can use the form method B<dump>, which dumps out the
+You can use the form method B<dumpmeta>, which dumps out the
 META hash, in your template to see what happens:
 
- <% form.dump %>
+ <% form.dumpmeta %>
 
 Beside errors per field there is also a global error
 variable which can be put out using the B<error> method:
@@ -1376,9 +1391,6 @@ T. Linden <tlinden |AT| cpan.org>
 
 =head1 VERSION
 
-0.02
+0.03
 
 =cut
-
-
-1;
